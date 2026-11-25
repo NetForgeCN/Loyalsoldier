@@ -40,58 +40,20 @@ endef
 GEOIP_URL:=https://github.com/NetForgeCN/v2ray-rules-dat/releases/latest/download/geoip.dat
 GEOSITE_URL:=https://github.com/NetForgeCN/v2ray-rules-dat/releases/latest/download/geosite.dat
 
-# HTTPS only (including redirects), fail on HTTP/TLS errors, bounded time and
-# size, with retries. Each URL is downloaded exactly once per build.
-CURL_FLAGS:=--fail --silent --show-error --proto '=https' --proto-redir '=https' --location --max-redirs 5 --connect-timeout 15 --max-time 300 --retry 3 --retry-delay 2 --max-filesize 67108864
+
+# 下载/校验逻辑已抽到 fetch-geodata.sh：Build/Compile 里的内联 shell 在
+# OpenWrt package.mk 的 $(call) 二次展开下会把 $$1 / $$url 吃掉首字符，
+# 导致 curl 拿到裸串并按 http 处理（--proto '=https' 直接拒绝）。
+# Build/Prepare 负责把脚本送进 PKG_BUILD_DIR，Compile 只传 URL 并调用。
+define Build/Prepare
+	$(INSTALL_DIR) $(PKG_BUILD_DIR)
+	$(CP) ./fetch-geodata.sh $(PKG_BUILD_DIR)/fetch-geodata.sh
+endef
 
 define Build/Compile
-	( \
-		set -eu; \
-		cd "$(PKG_BUILD_DIR)"; \
-		sha256_of() { \
-			if command -v sha256sum >/dev/null 2>&1; then \
-				sha256sum "$$1" | awk '{print $$1}'; \
-			elif command -v shasum >/dev/null 2>&1; then \
-				shasum -a 256 "$$1" | awk '{print $$1}'; \
-			else \
-				openssl dgst -sha256 "$$1" | awk '{print $$NF}'; \
-			fi; \
-		}; \
-		fetch() { \
-			url="$$1"; dest="$$2"; tmp="$${dest}.part"; \
-			trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-			curl $(CURL_FLAGS) "$$url" -o "$$tmp"; \
-			size=$$(wc -c < "$$tmp" | tr -d '[:space:]'); \
-			[ "$$size" -ge 16 ] || { echo "empty download: $$url" >&2; return 1; }; \
-			[ "$$size" -le 67108864 ] || { echo "oversized download: $$url" >&2; return 1; }; \
-			if head -c 512 "$$tmp" | grep -Eqi '<(!doctype|html|head|body)|<error|access denied|too many requests'; then \
-				echo "download looks like an HTML/error page: $$url" >&2; return 1; \
-			fi; \
-			mv -f "$$tmp" "$$dest"; \
-		}; \
-		verify() { \
-			dest="$$1"; sumfile="$$2"; name="$$3"; \
-			expected=$$(awk -v want="$$name" ' \
-				NF == 1 { print $$1; n++; next } \
-				NF == 2 { if ($$2 != want && $$2 != "./" want) exit 1; print $$1; n++; next } \
-				{ exit 1 } \
-				END { if (n != 1) exit 1 } \
-			' "$$sumfile") || { echo "malformed checksum file for $$name" >&2; return 1; }; \
-			case "$$expected" in \
-				''|*[!0-9a-fA-F]*) echo "malformed checksum for $$name" >&2; return 1 ;; \
-			esac; \
-			[ "$${#expected}" -eq 64 ] || { echo "malformed checksum for $$name" >&2; return 1; }; \
-			actual=$$(sha256_of "$$dest"); \
-			[ "$$actual" = "$$expected" ] || { echo "SHA-256 mismatch for $$name" >&2; return 1; }; \
-			echo "verified $$name ($$actual)"; \
-		}; \
-		fetch "$(GEOIP_URL)" geoip.dat; \
-		fetch "$(GEOIP_URL).sha256sum" geoip.dat.sha256sum; \
-		verify geoip.dat geoip.dat.sha256sum geoip.dat; \
-		fetch "$(GEOSITE_URL)" geosite.dat; \
-		fetch "$(GEOSITE_URL).sha256sum" geosite.dat.sha256sum; \
-		verify geosite.dat geosite.dat.sha256sum geosite.dat; \
-	)
+	cd "$(PKG_BUILD_DIR)"; \
+		GEOIP_URL="$(GEOIP_URL)" GEOSITE_URL="$(GEOSITE_URL)" \
+		bash ./fetch-geodata.sh
 endef
 
 define Package/v2ray-geoip/install
